@@ -1,0 +1,35 @@
+services:
+  fasttext-classifier:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: document-quality-classifier
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount data directories for persistence
+      - ../data:/app/data
+      - ../models:/app/models
+      # Optionally mount logs directory
+      - ./logs:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    # Resource configuration (for regular docker-compose)
+    cpus: 4.0              # Use up to 4 CPU cores  
+    mem_limit: 4g          # Use up to 4GB RAM
+    memswap_limit: 4g      # Disable swap
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add volumes for data persistence
+volumes:
+  data-volume:
+    driver: local
+  models-volume:
+    driver: local

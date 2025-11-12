@@ -1,0 +1,1 @@
+# FastText Document Quality Classifier
