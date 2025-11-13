@@ -34,6 +34,11 @@ def preprocess_text(text: str) -> str:
     text = re.sub(r'[!]{2,}', '!', text)
     text = re.sub(r'[?]{2,}', '?', text)
     
+    # Separate punctuation from words by adding spaces
+    # This helps FastText treat punctuation as separate tokens
+    text = re.sub(r'([a-zA-Z0-9])([.!?:;,()"\[\]{}])', r'\1 \2', text)  # After alphanumeric
+    text = re.sub(r'([.!?:;,()"\[\]{}])([a-zA-Z0-9])', r'\1 \2', text)  # Before alphanumeric
+    
     # Clean up extra spaces again
     text = re.sub(r'\s+', ' ', text)
     
