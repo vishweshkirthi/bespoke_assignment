@@ -31,6 +31,18 @@
         .status.loading { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
         .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .word-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .word-item { background: #e9ecef; color: #495057; padding: 6px 12px; border-radius: 15px; font-size: 14px; }
+        .similarity-score { font-size: 12px; color: #6c757d; }
+        .collapsible { cursor: pointer; padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; margin: 10px 0; }
+        .collapsible:hover { background: #e9ecef; }
+        .collapsible-content { display: none; padding: 15px; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 5px 5px; background: #fff; }
+        .collapsible.active + .collapsible-content { display: block; }
+        .param-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+        .param-item { display: flex; flex-direction: column; }
+        .param-item label { font-weight: bold; margin-bottom: 5px; }
+        .param-item input, .param-item select { padding: 5px; border: 1px solid #ced4da; border-radius: 3px; }
+        .autotune-badge { background: #17a2b8; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; margin-left: 8px; }
     </style>
 </head>
 <body>
@@ -46,6 +58,11 @@
         </select>
         <button class="button" onclick="selectModel()" id="selectModelButton">Load Selected Model</button>
         <button class="button" onclick="refreshModels()" style="background: #6c757d;">Refresh Models</button>
+        
+        <div id="currentModelHyperparams" style="margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 5px;">
+            <h4>Current Model Hyperparameters</h4>
+            <div id="modelHyperparamsContent">Loading...</div>
+        </div>
     </div>
     
     <div class="section">
@@ -59,6 +76,79 @@
             <input type="checkbox" id="useAutotune"> Use autotune (takes longer but may improve accuracy)
         </label>
         <br><br>
+        
+        <div class="collapsible" onclick="toggleCollapsible(this)">
+            <strong>⚙️ Hyperparameters</strong> <span style="font-size: 12px; color: #6c757d;">(click to expand)</span>
+        </div>
+        <div class="collapsible-content">
+            <p style="color: #6c757d; font-size: 14px; margin-bottom: 15px;">
+                Configure FastText training parameters. Default values are shown. Leave empty to use FastText defaults.
+            </p>
+            <div class="param-grid">
+                <div class="param-item">
+                    <label>Learning Rate (lr)</label>
+                    <input type="number" id="lr" step="0.01" min="0.01" max="10" placeholder="0.1">
+                </div>
+                <div class="param-item">
+                    <label>Dimensions (dim)</label>
+                    <input type="number" id="dim" min="1" max="1000" placeholder="100">
+                </div>
+                <div class="param-item">
+                    <label>Window Size (ws)</label>
+                    <input type="number" id="ws" min="1" max="20" placeholder="5">
+                </div>
+                <div class="param-item">
+                    <label>Epochs</label>
+                    <input type="number" id="epoch" min="1" max="1000" placeholder="5">
+                </div>
+                <div class="param-item">
+                    <label>Min N-gram (minn)</label>
+                    <input type="number" id="minn" min="0" max="10" placeholder="3">
+                </div>
+                <div class="param-item">
+                    <label>Max N-gram (maxn)</label>
+                    <input type="number" id="maxn" min="0" max="10" placeholder="6">
+                </div>
+                <div class="param-item">
+                    <label>Negative Sampling (neg)</label>
+                    <input type="number" id="neg" min="1" max="100" placeholder="5">
+                </div>
+                <div class="param-item">
+                    <label>Loss Function</label>
+                    <select id="loss">
+                        <option value="">Default (softmax)</option>
+                        <option value="softmax">softmax (multiclass classification)</option>
+                        <option value="ns">ns (negative sampling)</option>
+                        <option value="hs">hs (hierarchical softmax)</option>
+                        <option value="ova">ova (one-vs-all for multilabel)</option>
+                    </select>
+                </div>
+                <div class="param-item">
+                    <label>Model Type</label>
+                    <select id="model">
+                        <option value="">Default (supervised)</option>
+                        <option value="cbow" disabled>cbow (unsupervised - not supported)</option>
+                        <option value="skipgram" disabled>skipgram (unsupervised - not supported)</option>
+                        <option value="supervised">supervised</option>
+                    </select>
+                </div>
+                <div class="param-item">
+                    <label>Buckets</label>
+                    <input type="number" id="bucket" min="0" placeholder="2000000">
+                </div>
+                <div class="param-item">
+                    <label>Min Count</label>
+                    <input type="number" id="minCount" min="1" placeholder="1">
+                </div>
+                <div class="param-item">
+                    <label>Thread Count</label>
+                    <input type="number" id="thread" min="1" max="32" placeholder="12">
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <button type="button" class="button" style="background: #6c757d;" onclick="resetHyperparams()">Reset to Defaults</button>
+            </div>
+        </div>
         
         <button class="button" onclick="trainModel()" id="trainButton">Train Model</button>
         <div id="trainingInfo" style="display: none; margin-top: 10px; padding: 10px; background: #e8f4fd; border: 1px solid #b8daff; border-radius: 5px;">
@@ -82,6 +172,28 @@
         <input type="file" id="batchFile" accept=".txt" style="margin: 10px 0;">
         <button class="button" onclick="scoreBatch()" id="batchScoreButton">Score Batch File</button>
         <div id="batchResults"></div>
+    </div>
+    
+    <div class="section">
+        <h2>Find Similar Words</h2>
+        <p>Find words similar to a given input using the trained FastText model</p>
+        
+        <div style="display: flex; gap: 10px; align-items: center; margin: 10px 0;">
+            <input type="text" id="similarWordInput" placeholder="Enter a word..." style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 5px;">
+            <input type="number" id="similarWordCount" value="10" min="1" max="50" style="width: 80px; padding: 8px; border: 1px solid #ddd; border-radius: 5px;" title="Number of similar words">
+            <button class="button" onclick="findSimilarWords()" id="similarWordsButton">Find Similar</button>
+        </div>
+        
+        <div id="similarWordsResult"></div>
+        
+        <div style="margin-top: 20px;">
+            <h3>Model Vocabulary</h3>
+            <div style="display: flex; gap: 10px; align-items: center; margin: 10px 0;">
+                <button class="button" onclick="getVocabularyInfo()" id="vocabInfoButton" style="background: #6c757d;">Get Vocab Info</button>
+                <button class="button" onclick="getVocabularySample()" id="vocabSampleButton" style="background: #17a2b8;">Sample Words</button>
+            </div>
+            <div id="vocabularyInfo"></div>
+        </div>
     </div>
     
     <script>
@@ -125,6 +237,12 @@
                 if (status.progress === 100) {
                     // Training completed - auto-refresh models and hide info after delay
                     refreshModels();
+                    
+                    // Display final hyperparameters if available (especially for autotune)
+                    if (status.hyperparams_used) {
+                        displayHyperparams(status.hyperparams_used, status.autotune_used || false);
+                    }
+                    
                     setTimeout(() => {
                         trainingInfo.style.display = 'none';
                     }, 5000);
@@ -136,15 +254,30 @@
             try {
                 const response = await fetch('/model/status');
                 const data = await response.json();
+                console.log('Model status response:', data);
                 
                 const statusDiv = document.getElementById('modelStatus');
+                const hyperparamsDiv = document.getElementById('currentModelHyperparams');
+                
                 if (data.status === 'loaded') {
                     statusDiv.innerHTML = `<span class="status success">✓ Model loaded: ${data.model_name}</span>`;
+                    
+                    // Display hyperparameters if available
+                    if (data.hyperparams) {
+                        console.log('Displaying hyperparams:', data.hyperparams);
+                        displayCurrentModelHyperparams(data.hyperparams);
+                    } else {
+                        console.log('No hyperparams available');
+                        document.getElementById('modelHyperparamsContent').innerHTML = '<p style="color: #6c757d;">No hyperparameters available - model may need to be reloaded.</p>';
+                    }
                 } else {
                     statusDiv.innerHTML = '<span class="status error">✗ No model loaded. Please train or select a model.</span>';
+                    document.getElementById('modelHyperparamsContent').innerHTML = '<p style="color: #6c757d;">No model loaded. Please train or select a model to view hyperparameters.</p>';
                 }
             } catch (error) {
+                console.error('Error checking model status:', error);
                 document.getElementById('modelStatus').innerHTML = '<span class="status error">Error checking status</span>';
+                document.getElementById('modelHyperparamsContent').innerHTML = '<p style="color: #dc3545;">Error loading model status.</p>';
             }
         }
         
@@ -205,7 +338,7 @@
                     const data = await response.json();
                     console.log('Model loaded:', data);
                     
-                    // Refresh status and models list
+                    // Refresh status (which includes hyperparams) and models list
                     await checkModelStatus();
                     await refreshModels();
                     
@@ -254,6 +387,12 @@
                 formData.append('validation_file', validationFile);
             }
             
+            // Add hyperparameters
+            const hyperparams = collectHyperparams();
+            if (Object.keys(hyperparams).length > 0) {
+                formData.append('hyperparams', JSON.stringify(hyperparams));
+            }
+            
             try {
                 const response = await fetch('/train', {
                     method: 'POST',
@@ -275,6 +414,11 @@
                     
                     if (data.autotune_used) {
                         console.log('Using FastText autotune for hyperparameter optimization');
+                    }
+                    
+                    // Display initial hyperparameters if provided
+                    if (data.hyperparams_used) {
+                        displayHyperparams(data.hyperparams_used, false);
                     }
                 } else {
                     const error = await response.text();
@@ -436,39 +580,322 @@
                 html += `</div>`;
             }
             
-            // Sample predictions (first 10)
-            html += `<h4>Sample Predictions (first 10)</h4>`;
-            const samples = data.predictions.slice(0, 10);
-            
-            samples.forEach(pred => {
-                const bgColor = pred.error ? '#f8d7da' : 
-                               pred.is_high_quality ? '#d4edda' : '#fff3cd';
-                const textColor = pred.error ? '#721c24' : 
-                                 pred.is_high_quality ? '#155724' : '#856404';
+            // Sample predictions by confusion matrix category (5 examples each)
+            if (data.metrics && data.predictions.some(p => p.true_label)) {
+                html += `<h4>Sample Predictions by Category (5 examples each)</h4>`;
                 
-                html += `<div style="background: ${bgColor}; color: ${textColor}; padding: 10px; margin: 5px 0; border-radius: 5px;">`;
-                html += `<div><strong>Line ${pred.line_number}:</strong> `;
+                // Categorize predictions
+                const categories = {
+                    tp: [], // True Positive: predicted high, actually high
+                    tn: [], // True Negative: predicted low, actually low
+                    fp: [], // False Positive: predicted high, actually low
+                    fn: []  // False Negative: predicted low, actually high
+                };
                 
-                if (pred.error) {
-                    html += `ERROR - ${pred.error}`;
-                } else {
-                    html += `${pred.predicted_label.toUpperCase()} (${(pred.confidence * 100).toFixed(1)}%)`;
-                    if (pred.true_label) {
-                        const correct = pred.predicted_label === pred.true_label ? '✓' : '✗';
-                        html += ` | True: ${pred.true_label} ${correct}`;
+                data.predictions.forEach(pred => {
+                    if (pred.error || !pred.true_label) return;
+                    
+                    const predicted_high = pred.predicted_label === '__label__high';
+                    const true_high = pred.true_label === '__label__high';
+                    
+                    if (predicted_high && true_high) {
+                        categories.tp.push(pred);
+                    } else if (!predicted_high && !true_high) {
+                        categories.tn.push(pred);
+                    } else if (predicted_high && !true_high) {
+                        categories.fp.push(pred);
+                    } else if (!predicted_high && true_high) {
+                        categories.fn.push(pred);
                     }
+                });
+                
+                // Display each category
+                const categoryLabels = {
+                    tp: 'True Positives (Correctly predicted High Quality)',
+                    tn: 'True Negatives (Correctly predicted Low Quality)',
+                    fp: 'False Positives (Incorrectly predicted High Quality)',
+                    fn: 'False Negatives (Incorrectly predicted Low Quality)'
+                };
+                
+                const categoryColors = {
+                    tp: { bg: '#d4edda', text: '#155724' },
+                    tn: { bg: '#d4edda', text: '#155724' },
+                    fp: { bg: '#f8d7da', text: '#721c24' },
+                    fn: { bg: '#fff3cd', text: '#856404' }
+                };
+                
+                Object.keys(categories).forEach(category => {
+                    const samples = categories[category].slice(0, 5);
+                    if (samples.length > 0) {
+                        html += `<div style="margin: 15px 0;">`;
+                        html += `<h5 style="margin-bottom: 10px;">${categoryLabels[category]} (${categories[category].length} total, showing ${samples.length})</h5>`;
+                        
+                        samples.forEach(pred => {
+                            const colors = categoryColors[category];
+                            html += `<div style="background: ${colors.bg}; color: ${colors.text}; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 4px solid ${colors.text};">`;
+                            html += `<div><strong>Line ${pred.line_number}:</strong> `;
+                            html += `${pred.predicted_label.toUpperCase()} (${(pred.confidence * 100).toFixed(1)}%) | True: ${pred.true_label.toUpperCase()}`;
+                            html += `</div>`;
+                            html += `<div style="font-size: 12px; margin-top: 5px;">${pred.text}</div>`;
+                            html += `</div>`;
+                        });
+                        html += `</div>`;
+                    }
+                });
+            } else {
+                // Fallback to original display if no true labels
+                html += `<h4>Sample Predictions (first 10)</h4>`;
+                const samples = data.predictions.slice(0, 10);
+                
+                samples.forEach(pred => {
+                    const bgColor = pred.error ? '#f8d7da' : 
+                                   pred.is_high_quality ? '#d4edda' : '#fff3cd';
+                    const textColor = pred.error ? '#721c24' : 
+                                     pred.is_high_quality ? '#155724' : '#856404';
+                    
+                    html += `<div style="background: ${bgColor}; color: ${textColor}; padding: 10px; margin: 5px 0; border-radius: 5px;">`;
+                    html += `<div><strong>Line ${pred.line_number}:</strong> `;
+                    
+                    if (pred.error) {
+                        html += `ERROR - ${pred.error}`;
+                    } else {
+                        html += `${pred.predicted_label.toUpperCase()} (${(pred.confidence * 100).toFixed(1)}%)`;
+                    }
+                    html += `</div>`;
+                    html += `<div style="font-size: 12px; margin-top: 5px;">${pred.text}</div>`;
+                    html += `</div>`;
+                });
+                
+                if (data.predictions.length > 10) {
+                    html += `<p><em>... and ${data.predictions.length - 10} more results</em></p>`;
                 }
-                html += `</div>`;
-                html += `<div style="font-size: 12px; margin-top: 5px;">${pred.text}</div>`;
-                html += `</div>`;
-            });
-            
-            if (data.predictions.length > 10) {
-                html += `<p><em>... and ${data.predictions.length - 10} more results</em></p>`;
             }
             
             html += '</div>';
             resultsDiv.innerHTML = html;
+        }
+        
+        async function findSimilarWords() {
+            const wordInput = document.getElementById('similarWordInput');
+            const countInput = document.getElementById('similarWordCount');
+            const button = document.getElementById('similarWordsButton');
+            const resultDiv = document.getElementById('similarWordsResult');
+            
+            const word = wordInput.value.trim();
+            const k = parseInt(countInput.value) || 10;
+            
+            if (!word) {
+                alert('Please enter a word');
+                return;
+            }
+            
+            button.disabled = true;
+            button.innerHTML = '<div class="spinner"></div>Finding...';
+            resultDiv.innerHTML = '<div>Searching for similar words...</div>';
+            
+            try {
+                const response = await fetch(`/similarity/${encodeURIComponent(word)}?k=${k}`);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    displaySimilarWords(data);
+                } else {
+                    const error = await response.text();
+                    resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error.message}</div>`;
+            } finally {
+                button.disabled = false;
+                button.innerHTML = 'Find Similar';
+            }
+        }
+        
+        function displaySimilarWords(data) {
+            const resultDiv = document.getElementById('similarWordsResult');
+            
+            if (data.neighbors.length === 0) {
+                resultDiv.innerHTML = `<div style="background: #fff3cd; color: #856404; padding: 10px; border-radius: 5px;">No similar words found for "${data.word}"</div>`;
+                return;
+            }
+            
+            let html = `<div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 5px;">`;
+            html += `<h4>Similar words to "${data.word}" (${data.neighbors.length} results)</h4>`;
+            html += `<div class="word-list">`;
+            
+            data.neighbors.forEach(([word, score]) => {
+                const percentage = (score * 100).toFixed(1);
+                html += `<div class="word-item">`;
+                html += `<strong>${word}</strong><br>`;
+                html += `<span class="similarity-score">${percentage}%</span>`;
+                html += `</div>`;
+            });
+            
+            html += `</div>`;
+            html += `</div>`;
+            
+            resultDiv.innerHTML = html;
+        }
+        
+        async function getVocabularyInfo() {
+            const button = document.getElementById('vocabInfoButton');
+            const resultDiv = document.getElementById('vocabularyInfo');
+            
+            button.disabled = true;
+            button.innerHTML = '<div class="spinner"></div>Loading...';
+            
+            try {
+                const response = await fetch('/model/vocabulary/size');
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<div style="background: #e8f4fd; color: #0c5460; padding: 10px; border-radius: 5px;">
+                        <strong>Vocabulary Size:</strong> ${data.vocabulary_size.toLocaleString()} words
+                    </div>`;
+                } else {
+                    const error = await response.text();
+                    resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error.message}</div>`;
+            } finally {
+                button.disabled = false;
+                button.innerHTML = 'Get Vocab Info';
+            }
+        }
+        
+        async function getVocabularySample() {
+            const button = document.getElementById('vocabSampleButton');
+            const resultDiv = document.getElementById('vocabularyInfo');
+            
+            button.disabled = true;
+            button.innerHTML = '<div class="spinner"></div>Loading...';
+            
+            try {
+                const response = await fetch('/model/vocabulary/sample?limit=30');
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    let html = `<div style="background: #e8f4fd; color: #0c5460; padding: 15px; border-radius: 5px;">`;
+                    html += `<h4>Vocabulary Sample (${data.sample_size} of ${data.total_vocabulary_size.toLocaleString()} words)</h4>`;
+                    html += `<div class="word-list">`;
+                    
+                    data.sample_words.forEach(word => {
+                        html += `<div class="word-item" style="cursor: pointer;" onclick="document.getElementById('similarWordInput').value='${word}';">`;
+                        html += `${word}`;
+                        html += `</div>`;
+                    });
+                    
+                    html += `</div>`;
+                    html += `<p style="margin-top: 10px; font-size: 12px; color: #6c757d;">Click any word to search for similar words</p>`;
+                    html += `</div>`;
+                    
+                    resultDiv.innerHTML = html;
+                } else {
+                    const error = await response.text();
+                    resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;">Error: ${error.message}</div>`;
+            } finally {
+                button.disabled = false;
+                button.innerHTML = 'Sample Words';
+            }
+        }
+        
+        // Add Enter key support for similar words input
+        document.getElementById('similarWordInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                findSimilarWords();
+            }
+        });
+        
+        function toggleCollapsible(element) {
+            element.classList.toggle('active');
+        }
+        
+        function collectHyperparams() {
+            const params = {};
+            const paramIds = ['lr', 'dim', 'ws', 'epoch', 'minn', 'maxn', 'neg', 'loss', 'model', 'bucket', 'minCount', 'thread'];
+            
+            paramIds.forEach(id => {
+                const element = document.getElementById(id);
+                const value = element.value.trim();
+                if (value) {
+                    // Convert numeric values
+                    if (element.type === 'number') {
+                        params[id] = parseFloat(value);
+                    } else {
+                        params[id] = value;
+                    }
+                }
+            });
+            
+            return params;
+        }
+        
+        function resetHyperparams() {
+            const paramIds = ['lr', 'dim', 'ws', 'epoch', 'minn', 'maxn', 'neg', 'loss', 'model', 'bucket', 'minCount', 'thread'];
+            paramIds.forEach(id => {
+                document.getElementById(id).value = '';
+            });
+        }
+        
+        function displayHyperparams(hyperparams, isAutotuned = false) {
+            const paramContainer = document.getElementById('trainingStatus');
+            if (!hyperparams) return;
+            
+            let html = '<div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">';
+            html += '<h5>Used Hyperparameters';
+            if (isAutotuned) {
+                html += '<span class="autotune-badge">AUTOTUNED</span>';
+            }
+            html += '</h5>';
+            html += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; font-size: 12px;">';
+            
+            Object.entries(hyperparams).forEach(([key, value]) => {
+                html += `<div><strong>${key}:</strong> ${value}</div>`;
+            });
+            
+            html += '</div></div>';
+            paramContainer.innerHTML += html;
+        }
+        
+        function displayCurrentModelHyperparams(hyperparams) {
+            const container = document.getElementById('modelHyperparamsContent');
+            if (!hyperparams) {
+                container.innerHTML = '<p style="color: #6c757d;">Hyperparameters not available for this model.</p>';
+                return;
+            }
+            
+            let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; font-size: 14px;">';
+            
+            // Define friendly names and organize parameters
+            const paramLabels = {
+                lr: 'Learning Rate',
+                dim: 'Dimensions',
+                ws: 'Window Size', 
+                epoch: 'Epochs',
+                minn: 'Min N-gram',
+                maxn: 'Max N-gram',
+                neg: 'Negative Sampling',
+                loss: 'Loss Function',
+                bucket: 'Buckets',
+                minCount: 'Min Count',
+                thread: 'Threads'
+            };
+            
+            Object.entries(hyperparams).forEach(([key, value]) => {
+                const label = paramLabels[key] || key;
+                html += `<div style="padding: 8px; background: white; border-radius: 4px; border: 1px solid #dee2e6;">`;
+                html += `<div style="font-weight: bold; color: #495057;">${label}</div>`;
+                html += `<div style="color: #007bff; font-family: monospace;">${value}</div>`;
+                html += `</div>`;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
         }
         
         // Initialize

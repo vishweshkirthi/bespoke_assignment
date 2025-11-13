@@ -16,6 +16,7 @@ def sample_news_data(parquet_file, output_dir, total_samples=35000):
     
     # Read parquet file
     df = pd.read_parquet(parquet_file)
+    df = df[df['language'] == 'en']
     print(f"Total news articles: {len(df)}")
     
     # Sample random articles
@@ -49,9 +50,9 @@ def sample_news_data(parquet_file, output_dir, total_samples=35000):
     
     # Split into train/val/test (adjusted for available data)
     random.shuffle(texts)
-    train_texts = texts[:13000]  # 13k for training
-    val_texts = texts[13000:20000]  # 7k for validation  
-    test_texts = texts[20000:22320]  # 2320 for test
+    train_texts = texts[:20000]  # 20k for training
+    val_texts = texts[20000:30000]  # 10k for validation
+    test_texts = texts[30000:]  # ~10k for test
     
     print(f"News split - Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
     
@@ -71,7 +72,6 @@ def sample_crawl_data(jsonl_file, output_dir, total_samples=35000):
         for line_num, line in enumerate(f):
             if line_num % 10000 == 0:
                 print(f"Processed {line_num} lines, collected {len(texts)} valid texts")
-            
             if len(texts) >= total_samples:
                 break
                 
@@ -103,9 +103,9 @@ def sample_crawl_data(jsonl_file, output_dir, total_samples=35000):
     
     # Shuffle and split (adjusted for available data)
     random.shuffle(texts)
-    train_texts = texts[:13000]  # 13k for training
-    val_texts = texts[13000:20000]  # 7k for validation  
-    test_texts = texts[20000:22320]  # 2320 for test
+    train_texts = texts[:20000]  # 20k for training
+    val_texts = texts[20000:30000]  # 10k for validation
+    test_texts = texts[30000:]  # 10k for test
     
     print(f"Crawl split - Train: {len(train_texts)}, Val: {len(val_texts)}, Test: {len(test_texts)}")
     
