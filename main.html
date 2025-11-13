@@ -235,8 +235,13 @@
                 trainButton.innerHTML = 'Train Model';
                 
                 if (status.progress === 100) {
-                    // Training completed - auto-refresh models and hide info after delay
-                    refreshModels();
+                    // Training completed - auto-refresh models and auto-load the new model
+                    refreshModels().then(() => {
+                        // Auto-load the newly trained model
+                        if (status.model_uuid) {
+                            autoLoadNewModel(status.model_uuid);
+                        }
+                    });
                     
                     // Display final hyperparameters if available (especially for autotune)
                     if (status.hyperparams_used) {
@@ -254,7 +259,6 @@
             try {
                 const response = await fetch('/model/status');
                 const data = await response.json();
-                console.log('Model status response:', data);
                 
                 const statusDiv = document.getElementById('modelStatus');
                 const hyperparamsDiv = document.getElementById('currentModelHyperparams');
@@ -264,10 +268,8 @@
                     
                     // Display hyperparameters if available
                     if (data.hyperparams) {
-                        console.log('Displaying hyperparams:', data.hyperparams);
                         displayCurrentModelHyperparams(data.hyperparams);
                     } else {
-                        console.log('No hyperparams available');
                         document.getElementById('modelHyperparamsContent').innerHTML = '<p style="color: #6c757d;">No hyperparameters available - model may need to be reloaded.</p>';
                     }
                 } else {
@@ -306,9 +308,67 @@
                     });
                     document.getElementById('selectModelButton').disabled = false;
                 }
+                
+                return data; // Return the data for use in auto-loading
             } catch (error) {
                 console.error('Error loading models:', error);
                 document.getElementById('modelSelect').innerHTML = '<option value="">Error loading models</option>';
+                throw error;
+            }
+        }
+        
+        async function autoLoadNewModel(modelUuid) {
+            try {
+                console.log(`Auto-loading newly trained model: ${modelUuid}`);
+                
+                // Find the model in the dropdown that contains this UUID
+                const modelSelect = document.getElementById('modelSelect');
+                let foundModelId = null;
+                
+                for (const option of modelSelect.options) {
+                    if (option.value && option.value.includes(modelUuid.substring(0, 8))) {
+                        foundModelId = option.value;
+                        break;
+                    }
+                }
+                
+                if (foundModelId) {
+                    // Select the model in the dropdown
+                    modelSelect.value = foundModelId;
+                    
+                    // Automatically load the model
+                    const response = await fetch('/model/select', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({model_id: foundModelId})
+                    });
+                    
+                    if (response.ok) {
+                        console.log(`Successfully auto-loaded model: ${foundModelId}`);
+                        
+                        // Refresh status to show the loaded model and hyperparameters
+                        await checkModelStatus();
+                        await refreshModels(); // Update the dropdown to show current model
+                        
+                        // Show a success message
+                        const statusDiv = document.getElementById('modelStatus');
+                        const originalContent = statusDiv.innerHTML;
+                        statusDiv.innerHTML = '<span class="status success">✓ Newly trained model auto-loaded successfully!</span>';
+                        setTimeout(() => {
+                            checkModelStatus(); // Restore normal status
+                        }, 3000);
+                        
+                    } else {
+                        console.error('Failed to auto-load model');
+                    }
+                } else {
+                    console.warn('Could not find newly trained model in dropdown');
+                }
+                
+            } catch (error) {
+                console.error('Error auto-loading model:', error);
             }
         }
         
@@ -336,7 +396,6 @@
                 
                 if (response.ok) {
                     const data = await response.json();
-                    console.log('Model loaded:', data);
                     
                     // Refresh status (which includes hyperparams) and models list
                     await checkModelStatus();
@@ -401,7 +460,6 @@
                 
                 if (response.ok) {
                     const data = await response.json();
-                    console.log('Training started:', data);
                     
                     // Show training info immediately
                     const trainingInfo = document.getElementById('trainingInfo');
@@ -595,8 +653,13 @@
                 data.predictions.forEach(pred => {
                     if (pred.error || !pred.true_label) return;
                     
-                    const predicted_high = pred.predicted_label === '__label__high';
-                    const true_high = pred.true_label === '__label__high';
+                    const predicted_high = pred.predicted_label === 'high' || pred.predicted_label === '__label__high';
+                    const true_high = pred.true_label === 'high' || pred.true_label === '__label__high';
+                    
+                    // Debug logging for first few predictions
+                    if (categories.tp.length + categories.tn.length + categories.fp.length + categories.fn.length < 5) {
+                        console.log(`Pred: "${pred.predicted_label}", True: "${pred.true_label}", Pred_high: ${predicted_high}, True_high: ${true_high}`);
+                    }
                     
                     if (predicted_high && true_high) {
                         categories.tp.push(pred);
@@ -607,6 +670,14 @@
                     } else if (!predicted_high && true_high) {
                         categories.fn.push(pred);
                     }
+                });
+                
+                // Debug: log category counts
+                console.log('Category counts:', {
+                    tp: categories.tp.length,
+                    tn: categories.tn.length, 
+                    fp: categories.fp.length,
+                    fn: categories.fn.length
                 });
                 
                 // Display each category

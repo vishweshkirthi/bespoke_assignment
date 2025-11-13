@@ -63,7 +63,7 @@
    
     * Ability to probe the model by asking for similar words and phrases
 4. I also have the ability to control hyperparameters, or use fasttext's in-built autotune functionality 
-
+5. Preprocessing of text - I have done some very basic preprocessing including making everything to lower case, converting to UTF-8 encoding, treating punctuations as separate words/tokens, etc. 
 
 ## Next Steps
 1. Unit tests and api integration tests
