@@ -17,12 +17,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from preprocessing import preprocess_text, validate_text_requirements
 
 # Import separated API modules
-from score_api import router as score_router
-from train_api import router as train_router
-from similarity_api import router as similarity_router
-import score_api
-import train_api
-import similarity_api
+from api.score_api import router as score_router
+from api.train_api import router as train_router
+from api.similarity_api import router as similarity_router
+import api.score_api as score_api
+import api.train_api as train_api
+import api.similarity_api as similarity_api
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
