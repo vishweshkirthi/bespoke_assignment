@@ -9,6 +9,9 @@ from typing import Optional, List
 import logging
 import sys
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Add src directory to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -36,10 +39,21 @@ class BatchScoreResponse(BaseModel):
 # This will be set from main app
 current_model = None
 
+# Thread pool for non-blocking scoring operations
+scoring_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scoring")
+model_lock = threading.RLock()
+
 def set_model(model):
     """Set the current model for scoring"""
     global current_model
-    current_model = model
+    with model_lock:
+        current_model = model
+
+def _predict_sync(model, text, k=1):
+    """Synchronous prediction function to run in thread pool"""
+    if model is None:
+        raise ValueError("Model not available")
+    return model.predict(text, k=k)
 
 @router.post("/score", response_model=ScoreResponse)
 async def score_text(request: TextScore):
@@ -65,8 +79,21 @@ async def score_text(request: TextScore):
         raise HTTPException(status_code=400, detail="Text becomes empty after preprocessing")
     
     try:
-        # Get prediction using preprocessed text
-        prediction = current_model.predict(processed_text, k=1)
+        # Get prediction using preprocessed text asynchronously
+        with model_lock:
+            model_ref = current_model
+        
+        if model_ref is None:
+            raise HTTPException(status_code=503, detail="No model available. Please train a model first using /train endpoint.")
+        
+        loop = asyncio.get_event_loop()
+        prediction = await loop.run_in_executor(
+            scoring_executor, 
+            _predict_sync, 
+            model_ref, 
+            processed_text, 
+            1
+        )
         
         predicted_label = prediction[0][0].replace('__label__', '')
         confidence = float(prediction[1][0])
@@ -130,7 +157,7 @@ async def score_batch(file: UploadFile = File(...)):
             if not is_valid:
                 predictions.append({
                     "line_number": line_num,
-                    "text": text[:100] + "..." if len(text) > 100 else text,
+                    "text": text,
                     "error": error_message,
                     "true_label": true_label
                 })
@@ -141,14 +168,33 @@ async def score_batch(file: UploadFile = File(...)):
             if not processed_text:
                 predictions.append({
                     "line_number": line_num,
-                    "text": text[:100] + "..." if len(text) > 100 else text,
+                    "text": text,
                     "error": "Text becomes empty after preprocessing",
                     "true_label": true_label
                 })
                 continue
             
-            # Get prediction
-            prediction = current_model.predict(processed_text, k=1)
+            # Get prediction asynchronously
+            with model_lock:
+                model_ref = current_model
+            
+            if model_ref is None:
+                predictions.append({
+                    "line_number": line_num,
+                    "text": text,
+                    "error": "Model not available",
+                    "true_label": true_label
+                })
+                continue
+            
+            loop = asyncio.get_event_loop()
+            prediction = await loop.run_in_executor(
+                scoring_executor,
+                _predict_sync,
+                model_ref,
+                processed_text,
+                1
+            )
             predicted_label = prediction[0][0].replace('__label__', '')
             confidence = float(prediction[1][0])
             
@@ -157,7 +203,7 @@ async def score_batch(file: UploadFile = File(...)):
             
             prediction_result = {
                 "line_number": line_num,
-                "text": text[:100] + "..." if len(text) > 100 else text,
+                "text": text,
                 "predicted_label": predicted_label,
                 "confidence": confidence,
                 "is_high_quality": is_high_quality,

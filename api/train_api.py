@@ -16,6 +16,8 @@ import asyncio
 import uuid
 from datetime import datetime
 import sys
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Add src directory to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -55,6 +57,12 @@ negative_file_path = None
 # Callback for notifying main app when model changes
 model_update_callback = None
 
+# Thread pool for training operations (single worker to prevent conflicts)
+training_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="training")
+
+# Training queue to handle sequential requests
+training_queue = asyncio.Queue()
+
 # WebSocket connections for training progress
 active_connections: List[WebSocket] = []
 
@@ -63,8 +71,13 @@ training_status = {
     "is_training": False,
     "progress": 0,
     "message": "",
-    "total_examples": 0
+    "total_examples": 0,
+    "queue_position": 0,
+    "queue_size": 0
 }
+
+# Lock for thread-safe model updates
+model_lock = threading.RLock()
 
 def set_globals(model, path, neg_file_path):
     """Set global variables from main app"""
@@ -78,10 +91,11 @@ def get_current_model():
     return current_model
 
 def update_current_model(new_model, new_path):
-    """Update current model"""
+    """Update current model thread-safely"""
     global current_model, model_path
-    current_model = new_model
-    model_path = new_path
+    with model_lock:
+        current_model = new_model
+        model_path = new_path
 
 def combine_datasets(positive_file_path: str, negative_file_path: str, output_path: str):
     """Combine positive and negative files for training with preprocessing"""
@@ -139,6 +153,70 @@ async def broadcast_training_status():
         for conn in disconnected:
             active_connections.remove(conn)
 
+def _train_fasttext_sync(combined_file: str, validation_file_path: str = None, hyperparams: dict = None):
+    """Synchronous FastText training function to run in thread pool"""
+    # Prepare training parameters
+    train_params = {
+        'input': combined_file,
+        'lr': 0.1,
+        'epoch': 20,
+        'wordNgrams': 2,
+        'dim': 100,
+        'ws': 5,
+        'minCount': 5,
+        'minn': 3,
+        'maxn': 6,
+        'neg': 5,
+        'loss': 'softmax',
+        'verbose': 0
+    }
+    
+    # Override with custom hyperparameters if provided
+    if hyperparams:
+        train_params.update(hyperparams)
+    
+    # Train the model with or without autotune
+    if validation_file_path:
+        # For autotune, use base parameters but let FastText optimize them
+        autotune_params = {
+            'input': combined_file,
+            'autotuneValidationFile': validation_file_path,
+            'autotuneDuration': 300,  # 5 minutes max
+            'verbose': 0
+        }
+        
+        model = fasttext.train_supervised(**autotune_params)
+        autotune_used = True
+        
+        # Get the autotuned hyperparameters
+        autotuned_params = {}
+        try:
+            if hasattr(model, 'f'):
+                args = model.f.getArgs()
+                autotuned_params = {
+                    "lr": args.lr,
+                    "dim": args.dim,
+                    "ws": args.ws,
+                    "epoch": args.epoch,
+                    "minn": args.minn,
+                    "maxn": args.maxn,
+                    "neg": args.neg,
+                    "loss": str(args.loss),
+                    "bucket": args.bucket,
+                    "minCount": args.minCount,
+                    "thread": args.thread
+                }
+        except Exception as e:
+            logger.warning(f"Could not extract autotuned parameters: {e}")
+        
+        final_params = autotuned_params if autotuned_params else "autotune_optimized"
+    else:
+        model = fasttext.train_supervised(**train_params)
+        autotune_used = False
+        final_params = train_params.copy()
+    
+    return model, autotune_used, final_params
+
 async def train_model_background(positive_file_path: str, validation_file_path: str = None, hyperparams: dict = None):
     """Train model in background with progress updates"""
     global current_model, model_path, training_status
@@ -161,9 +239,8 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         
         logger.info("Starting FastText training...")
         
-        # Prepare training parameters
-        train_params = {
-            'input': combined_file,
+        # Store hyperparameters in training status
+        initial_params = {
             'lr': 0.1,
             'epoch': 20,
             'wordNgrams': 2,
@@ -173,65 +250,40 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
             'minn': 3,
             'maxn': 6,
             'neg': 5,
-            'loss': 'softmax',
-            'verbose': 0
+            'loss': 'softmax'
         }
         
-        # Override with custom hyperparameters if provided
         if hyperparams:
-            train_params.update(hyperparams)
+            initial_params.update(hyperparams)
             logger.info(f"Using custom hyperparameters: {hyperparams}")
         
-        # Store hyperparameters in training status
-        training_status["hyperparams_used"] = train_params.copy()
+        training_status["hyperparams_used"] = initial_params.copy()
         
-        # Train the model with or without autotune
+        # Train the model asynchronously using thread pool
         if validation_file_path:
             training_status["message"] = "Training with autotune (this may take several minutes)..."
             training_status["progress"] = -1  # Indeterminate progress
             await broadcast_training_status()
-            
-            # For autotune, use base parameters but let FastText optimize them
-            autotune_params = {
-                'input': combined_file,
-                'autotuneValidationFile': validation_file_path,
-                'autotuneDuration': 300,  # 5 minutes max
-                'verbose': 0
-            }
-            
-            model = fasttext.train_supervised(**autotune_params)
-            training_status["autotune_used"] = True
-            
-            # Get the autotuned hyperparameters
-            autotuned_params = {}
-            try:
-                if hasattr(model, 'f'):
-                    args = model.f.getArgs()
-                    autotuned_params = {
-                        "lr": args.lr,
-                        "dim": args.dim,
-                        "ws": args.ws,
-                        "epoch": args.epoch,
-                        "minn": args.minn,
-                        "maxn": args.maxn,
-                        "neg": args.neg,
-                        "loss": str(args.loss),
-                        "bucket": args.bucket,
-                        "minCount": args.minCount,
-                        "thread": args.thread
-                    }
-                    training_status["hyperparams_used"] = autotuned_params
-                    logger.info(f"Autotuned hyperparameters: {autotuned_params}")
-            except Exception as e:
-                logger.warning(f"Could not extract autotuned parameters: {e}")
-                
         else:
             training_status["message"] = "Training model..."
             training_status["progress"] = -1  # Indeterminate progress
             await broadcast_training_status()
-            
-            model = fasttext.train_supervised(**train_params)
-            training_status["autotune_used"] = False
+        
+        # Run training in thread pool to prevent blocking
+        loop = asyncio.get_event_loop()
+        model, autotune_used, final_params = await loop.run_in_executor(
+            training_executor,
+            _train_fasttext_sync,
+            combined_file,
+            validation_file_path,
+            hyperparams
+        )
+        
+        training_status["autotune_used"] = autotune_used
+        training_status["hyperparams_used"] = final_params
+        
+        if autotune_used and isinstance(final_params, dict):
+            logger.info(f"Autotuned hyperparameters: {final_params}")
         
         training_status["message"] = "Saving model..."
         training_status["progress"] = 80
@@ -248,9 +300,10 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         # Save the model with UUID-based name
         model.save_model(full_model_path)
         
-        # Update global model and path
-        current_model = model
-        model_path = full_model_path
+        # Update global model and path thread-safely
+        with model_lock:
+            current_model = model
+            model_path = full_model_path
         
         # Notify main app of model change
         if model_update_callback:
@@ -298,6 +351,7 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         await asyncio.sleep(3)
         training_status["message"] = ""
         training_status["progress"] = 0
+        training_status["queue_size"] = training_queue.qsize()
         await broadcast_training_status()
         
     except Exception as e:
@@ -306,6 +360,49 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         training_status["message"] = f"Training failed: {str(e)}"
         training_status["progress"] = 0
         await broadcast_training_status()
+
+async def process_training_queue():
+    """Process training requests from the queue sequentially"""
+    global training_status
+    
+    while True:
+        try:
+            # Get next training request from queue
+            training_request = await training_queue.get()
+            
+            # Update queue status
+            training_status["queue_size"] = training_queue.qsize()
+            training_status["queue_position"] = 0
+            await broadcast_training_status()
+            
+            # Store request info in training status for background task
+            training_status["model_uuid"] = training_request["model_uuid"]
+            training_status["model_filename"] = training_request["model_filename"]
+            
+            # Process the training request
+            await train_model_background(
+                training_request["positive_file_path"],
+                training_request["validation_file_path"],
+                training_request["hyperparams"]
+            )
+            
+            # Mark this request as done
+            training_queue.task_done()
+            
+            # Update queue status
+            training_status["queue_size"] = training_queue.qsize()
+            await broadcast_training_status()
+            
+            # If queue is empty, exit the processor
+            if training_queue.empty():
+                break
+                
+        except Exception as e:
+            logger.error(f"Error processing training queue: {e}")
+            training_status["is_training"] = False
+            training_status["message"] = f"Training queue error: {str(e)}"
+            await broadcast_training_status()
+            break
 
 @router.post("/train", response_model=TrainResponse)
 async def train_model(
@@ -387,23 +484,30 @@ async def train_model(
                 logger.warning(f"Invalid hyperparameters JSON: {e}")
                 parsed_hyperparams = None
         
-        # Start training in background
-        asyncio.create_task(train_model_background(temp_file_path, validation_file_path, parsed_hyperparams))
+        # Add training request to queue
+        training_request = {
+            "positive_file_path": temp_file_path,
+            "validation_file_path": validation_file_path,
+            "hyperparams": parsed_hyperparams,
+            "model_uuid": model_uuid,
+            "model_filename": model_filename
+        }
+        
+        await training_queue.put(training_request)
+        
+        # Update queue status
+        training_status["queue_size"] = training_queue.qsize()
+        await broadcast_training_status()
+        
+        # Start training processor if not already running
+        if not training_status["is_training"]:
+            asyncio.create_task(process_training_queue())
         
         autotune_message = " with autotune" if validation_file else ""
-        
-        # Generate UUID for the model that will be created
-        model_uuid = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        autotune_suffix = "_autotune" if validation_file else ""
-        model_filename = f"model_{timestamp}_{model_uuid[:8]}{autotune_suffix}.bin"
-        
-        # Store the UUID in training status for the background task
-        training_status["model_uuid"] = model_uuid
-        training_status["model_filename"] = model_filename
+        queue_position = training_queue.qsize()
         
         return TrainResponse(
-            message=f"Training{autotune_message} started in background. Model UUID: {model_uuid}",
+            message=f"Training{autotune_message} queued. Queue position: {queue_position}. Model UUID: {model_uuid}",
             training_examples=total_examples,
             model_saved=f"models/{model_filename}",
             autotune_used=bool(validation_file),
@@ -537,6 +641,16 @@ async def select_model(request: ModelSelectRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+
+@router.get("/training/queue")
+async def training_queue_status():
+    """Get current training queue status"""
+    return {
+        "queue_size": training_queue.qsize(),
+        "is_training": training_status["is_training"],
+        "current_message": training_status.get("message", ""),
+        "current_progress": training_status.get("progress", 0)
+    }
 
 @router.get("/model/status")
 async def model_status():
