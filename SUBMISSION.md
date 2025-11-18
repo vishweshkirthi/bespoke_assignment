@@ -12,7 +12,13 @@
 6. You can get more information from `README.md` or `docs/api_usage.md`
 7. I also have a dockerfile for this app that you can refer to. However, it is much faster to run training outside the docker image (unless you want to allocate more resources by editing the `docker/docker-compose.yml` file).
 * to build and run the docker image, run `docker compose up --build`
-* after the build and run are successful, you will be able to access the ui in `localhost:8000/ui` 
+* after the build and run are successful, you will be able to access the ui in `localhost:8000/ui`
+
+New Updates on Nov 17 2025:
+1. I am now allowing for training to be a non-blocking job by using a combination of asyncio, thread pools and queues.
+2. Basically every new training job is first written to a queue, and if there are less than 4 jobs in queue (arbitrarily chosen for now) it is run immediately. Otherwise it is just added to the queue and will be run when a worker gets free. 
+3. In any case, after adding to the queue, the train api will be kept open still to accept either new training jobs, or scoring jobs on already trained models.
+4. I am also adding a table of all jobs since the start of server (information is kept in memory, so is not maintained when server is brought down and brought back up for now) for visibility.
 
 ## What to expect in the UI?
 

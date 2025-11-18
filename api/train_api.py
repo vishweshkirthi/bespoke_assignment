@@ -57,8 +57,8 @@ negative_file_path = None
 # Callback for notifying main app when model changes
 model_update_callback = None
 
-# Thread pool for training operations (single worker to prevent conflicts)
-training_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="training")
+# Thread pool for training operations (4 concurrent workers)
+training_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="training")
 
 # Training queue to handle sequential requests
 training_queue = asyncio.Queue()
@@ -75,6 +75,13 @@ training_status = {
     "queue_position": 0,
     "queue_size": 0
 }
+
+# Track active training jobs
+_active_training_jobs = 0
+_max_concurrent_jobs = 4
+
+# Track individual training job details
+_training_jobs = {}  # {job_id: {uuid, status, progress, message, started_at, completed_at}}
 
 # Lock for thread-safe model updates
 model_lock = threading.RLock()
@@ -217,19 +224,19 @@ def _train_fasttext_sync(combined_file: str, validation_file_path: str = None, h
     
     return model, autotune_used, final_params
 
-async def train_model_background(positive_file_path: str, validation_file_path: str = None, hyperparams: dict = None):
+async def train_model_background(positive_file_path: str, validation_file_path: str = None, hyperparams: dict = None, model_uuid: str = None, model_filename: str = None):
     """Train model in background with progress updates"""
     global current_model, model_path, training_status
     
     try:
-        # Update training status
+        # Update training status - only set is_training when actually processing
         training_status["is_training"] = True
         training_status["progress"] = 0
         training_status["message"] = "Preparing data..."
         await broadcast_training_status()
         
-        # Create temporary combined training file
-        combined_file = "temp_combined_train.txt"
+        # Create temporary combined training file with unique name
+        combined_file = f"temp_combined_train_{model_uuid[:8]}.txt"
         total_examples = combine_datasets(positive_file_path, negative_file_path, combined_file)
         
         training_status["total_examples"] = total_examples
@@ -289,9 +296,12 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         training_status["progress"] = 80
         await broadcast_training_status()
         
-        # Use the UUID and filename from training status (generated when training started)
-        model_uuid = training_status.get("model_uuid", str(uuid.uuid4()))
-        model_filename = training_status.get("model_filename", f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{model_uuid[:8]}.bin")
+        # Use the provided UUID and filename, or generate new ones if not provided
+        if not model_uuid:
+            model_uuid = training_status.get("model_uuid", str(uuid.uuid4()))
+        if not model_filename:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            model_filename = training_status.get("model_filename", f"model_{timestamp}_{model_uuid[:8]}.bin")
         full_model_path = f"models/{model_filename}"
         
         # Ensure models directory exists
@@ -339,20 +349,34 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         training_status["is_training"] = False
         await broadcast_training_status()
         
-        # Cleanup
-        os.remove(combined_file)
-        os.remove(positive_file_path)  # Remove uploaded file
-        if validation_file_path:
-            os.remove(validation_file_path)  # Remove uploaded validation file
-        
         logger.info(f"Training completed! Model saved to {model_path}")
         
-        # Reset status after a delay
+        # Reset status for this specific training session
         await asyncio.sleep(3)
-        training_status["message"] = ""
-        training_status["progress"] = 0
-        training_status["queue_size"] = training_queue.qsize()
-        await broadcast_training_status()
+        
+        # Send completion status for this specific model
+        completion_status = {
+            "is_training": False,
+            "progress": 100,
+            "message": "Training completed!",
+            "model_uuid": model_uuid,
+            "queue_size": training_queue.qsize(),
+            "active_jobs": _active_training_jobs
+        }
+        
+        # Broadcast completion
+        if active_connections:
+            message = json.dumps(completion_status)
+            disconnected = []
+            for connection in active_connections:
+                try:
+                    await connection.send_text(message)
+                except:
+                    disconnected.append(connection)
+            
+            # Remove disconnected clients
+            for conn in disconnected:
+                active_connections.remove(conn)
         
     except Exception as e:
         logger.error(f"Training failed: {e}")
@@ -360,49 +384,108 @@ async def train_model_background(positive_file_path: str, validation_file_path: 
         training_status["message"] = f"Training failed: {str(e)}"
         training_status["progress"] = 0
         await broadcast_training_status()
-
-async def process_training_queue():
-    """Process training requests from the queue sequentially"""
-    global training_status
     
-    while True:
+    finally:
+        # Cleanup temporary files with error handling
         try:
-            # Get next training request from queue
-            training_request = await training_queue.get()
-            
-            # Update queue status
-            training_status["queue_size"] = training_queue.qsize()
-            training_status["queue_position"] = 0
-            await broadcast_training_status()
-            
-            # Store request info in training status for background task
+            if os.path.exists(combined_file):
+                os.remove(combined_file)
+        except Exception as e:
+            logger.warning(f"Could not remove combined file {combined_file}: {e}")
+        
+        try:
+            if os.path.exists(positive_file_path):
+                os.remove(positive_file_path)
+        except Exception as e:
+            logger.warning(f"Could not remove positive file {positive_file_path}: {e}")
+        
+        try:
+            if validation_file_path and os.path.exists(validation_file_path):
+                os.remove(validation_file_path)
+        except Exception as e:
+            logger.warning(f"Could not remove validation file {validation_file_path}: {e}")
+
+async def process_single_training_request(training_request):
+    """Process a single training request and manage concurrent job count"""
+    global _active_training_jobs, training_status, _training_jobs
+    
+    job_id = training_request["model_uuid"]
+    
+    # Add job to tracking
+    _training_jobs[job_id] = {
+        "uuid": job_id,
+        "status": "starting",
+        "progress": 0,
+        "message": "Initializing training...",
+        "started_at": datetime.now().isoformat(),
+        "completed_at": None,
+        "filename": training_request["model_filename"]
+    }
+    
+    try:
+        # Store request info in training status for background task (for the first/primary job)
+        if _active_training_jobs == 1:  # This is the first active job
             training_status["model_uuid"] = training_request["model_uuid"]
             training_status["model_filename"] = training_request["model_filename"]
-            
-            # Process the training request
-            await train_model_background(
-                training_request["positive_file_path"],
-                training_request["validation_file_path"],
-                training_request["hyperparams"]
-            )
-            
-            # Mark this request as done
-            training_queue.task_done()
-            
+        
+        # Update job status
+        _training_jobs[job_id]["status"] = "training"
+        _training_jobs[job_id]["message"] = "Training in progress..."
+        
+        # Process the training request
+        await train_model_background(
+            training_request["positive_file_path"],
+            training_request["validation_file_path"],
+            training_request["hyperparams"],
+            training_request["model_uuid"],
+            training_request["model_filename"]
+        )
+        
+        # Mark as completed
+        _training_jobs[job_id]["status"] = "completed"
+        _training_jobs[job_id]["progress"] = 100
+        _training_jobs[job_id]["message"] = "Training completed successfully"
+        _training_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        
+        logger.info(f"Training completed for model {training_request['model_uuid']}")
+        
+    except Exception as e:
+        # Mark as failed
+        _training_jobs[job_id]["status"] = "failed"
+        _training_jobs[job_id]["message"] = f"Training failed: {str(e)}"
+        _training_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        logger.error(f"Error processing training request {training_request.get('model_uuid', 'unknown')}: {e}")
+    
+    finally:
+        # Decrement active job count
+        _active_training_jobs -= 1
+        
+        # Check if there are queued requests to process
+        if not training_queue.empty() and _active_training_jobs < _max_concurrent_jobs:
+            try:
+                # Get next request from queue
+                next_request = await training_queue.get()
+                _active_training_jobs += 1
+                
+                # Update queue status
+                training_status["queue_size"] = training_queue.qsize()
+                await broadcast_training_status()
+                
+                # Process the next request
+                asyncio.create_task(process_single_training_request(next_request))
+                training_queue.task_done()
+                
+            except Exception as e:
+                logger.error(f"Error starting next training from queue: {e}")
+        else:
             # Update queue status
             training_status["queue_size"] = training_queue.qsize()
             await broadcast_training_status()
-            
-            # If queue is empty, exit the processor
-            if training_queue.empty():
-                break
-                
-        except Exception as e:
-            logger.error(f"Error processing training queue: {e}")
-            training_status["is_training"] = False
-            training_status["message"] = f"Training queue error: {str(e)}"
-            await broadcast_training_status()
-            break
+        
+        # Clean up job from tracking after delay (keep for 5 minutes for viewing)
+        await asyncio.sleep(300)  # 5 minutes
+        if job_id in _training_jobs:
+            del _training_jobs[job_id]
 
 @router.post("/train", response_model=TrainResponse)
 async def train_model(
@@ -484,6 +567,12 @@ async def train_model(
                 logger.warning(f"Invalid hyperparameters JSON: {e}")
                 parsed_hyperparams = None
         
+        # Generate UUID for the model that will be created
+        model_uuid = str(uuid.uuid4())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        autotune_suffix = "_autotune" if validation_file else ""
+        model_filename = f"model_{timestamp}_{model_uuid[:8]}{autotune_suffix}.bin"
+        
         # Add training request to queue
         training_request = {
             "positive_file_path": temp_file_path,
@@ -499,15 +588,23 @@ async def train_model(
         training_status["queue_size"] = training_queue.qsize()
         await broadcast_training_status()
         
-        # Start training processor if not already running
-        if not training_status["is_training"]:
-            asyncio.create_task(process_training_queue())
+        # Start training immediately if under concurrent limit, otherwise queue
+        global _active_training_jobs
+        if _active_training_jobs < _max_concurrent_jobs:
+            _active_training_jobs += 1
+            asyncio.create_task(process_single_training_request(training_request))
+        # If at capacity, the request stays in queue and will be processed when a slot frees up
         
         autotune_message = " with autotune" if validation_file else ""
-        queue_position = training_queue.qsize()
+        
+        if _active_training_jobs <= _max_concurrent_jobs:
+            status_message = f"Training{autotune_message} started. Model UUID: {model_uuid}"
+        else:
+            queue_position = training_queue.qsize()
+            status_message = f"Training{autotune_message} queued (position {queue_position}). Model UUID: {model_uuid}"
         
         return TrainResponse(
-            message=f"Training{autotune_message} queued. Queue position: {queue_position}. Model UUID: {model_uuid}",
+            message=status_message,
             training_examples=total_examples,
             model_saved=f"models/{model_filename}",
             autotune_used=bool(validation_file),
@@ -645,12 +742,47 @@ async def select_model(request: ModelSelectRequest):
 @router.get("/training/queue")
 async def training_queue_status():
     """Get current training queue status"""
+    global _active_training_jobs
     return {
         "queue_size": training_queue.qsize(),
-        "is_training": training_status["is_training"],
+        "active_jobs": _active_training_jobs,
+        "max_concurrent_jobs": _max_concurrent_jobs,
+        "is_training": _active_training_jobs > 0,
         "current_message": training_status.get("message", ""),
-        "current_progress": training_status.get("progress", 0)
+        "current_progress": training_status.get("progress", 0),
+        "accepts_new_requests": True,  # Always accept new requests
+        "slots_available": _max_concurrent_jobs - _active_training_jobs
     }
+
+@router.get("/training/jobs")
+async def get_training_jobs():
+    """Get all current and recent training jobs with their status"""
+    global _training_jobs
+    
+    jobs_list = []
+    for job_id, job_info in _training_jobs.items():
+        jobs_list.append({
+            "uuid": job_info["uuid"],
+            "short_uuid": job_info["uuid"][:8],
+            "filename": job_info["filename"],
+            "status": job_info["status"],
+            "progress": job_info["progress"],
+            "message": job_info["message"],
+            "started_at": job_info["started_at"],
+            "completed_at": job_info["completed_at"]
+        })
+    
+    # Sort by started_at (newest first)
+    jobs_list.sort(key=lambda x: x["started_at"], reverse=True)
+    
+    return {
+        "jobs": jobs_list,
+        "total_jobs": len(jobs_list),
+        "active_count": len([j for j in jobs_list if j["status"] in ["starting", "training"]]),
+        "completed_count": len([j for j in jobs_list if j["status"] == "completed"]),
+        "failed_count": len([j for j in jobs_list if j["status"] == "failed"])
+    }
+
 
 @router.get("/model/status")
 async def model_status():
