@@ -243,9 +243,30 @@
     
     <script>
         let socket = null;
+        let sessionId = null;
+        
+        // Get tab-specific session ID using sessionStorage
+        function getSessionId() {
+            if (sessionId) return sessionId;
+            
+            // Try to get from sessionStorage (tab-specific)
+            sessionId = sessionStorage.getItem('tab_session_id');
+            
+            if (!sessionId) {
+                // Generate new tab-specific session ID
+                sessionId = 'tab_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+                sessionStorage.setItem('tab_session_id', sessionId);
+                console.log('Created new tab session:', sessionId);
+            } else {
+                console.log('Using existing tab session:', sessionId);
+            }
+            
+            return sessionId;
+        }
         
         function connectWebSocket() {
-            socket = new WebSocket('ws://localhost:8000/ws');
+            const currentSessionId = getSessionId();
+            socket = new WebSocket(`ws://localhost:8000/ws?session_id=${currentSessionId}`);
             
             socket.onmessage = function(event) {
                 const data = JSON.parse(event.data);
@@ -254,6 +275,10 @@
             
             socket.onclose = function() {
                 console.log('WebSocket connection closed');
+            };
+            
+            socket.onerror = function(error) {
+                console.log('WebSocket error:', error);
             };
         }
         
@@ -317,7 +342,11 @@
         
         async function checkModelStatus() {
             try {
-                const response = await fetch('/model/status');
+                const response = await fetch('/model/status', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 const data = await response.json();
                 
                 const statusDiv = document.getElementById('modelStatus');
@@ -345,7 +374,11 @@
         
         async function refreshModels() {
             try {
-                const response = await fetch('/models');
+                const response = await fetch('/models', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 const data = await response.json();
                 
                 const modelSelect = document.getElementById('modelSelect');
@@ -401,6 +434,7 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
+                            'X-Session-ID': getSessionId()
                         },
                         body: JSON.stringify({model_id: foundModelId})
                     });
@@ -450,6 +484,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-Session-ID': getSessionId()
                     },
                     body: JSON.stringify({model_id: selectedModel})
                 });
@@ -514,6 +549,9 @@
             try {
                 const response = await fetch('/train', {
                     method: 'POST',
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    },
                     body: formData
                 });
                 
@@ -594,6 +632,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-Session-ID': getSessionId()
                     },
                     body: JSON.stringify({text: text})
                 });
@@ -645,6 +684,9 @@
                 
                 const response = await fetch('/score/batch', {
                     method: 'POST',
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    },
                     body: formData
                 });
                 
@@ -822,7 +864,11 @@
             resultDiv.innerHTML = '<div>Searching for similar words...</div>';
             
             try {
-                const response = await fetch(`/similarity/${encodeURIComponent(word)}?k=${k}`);
+                const response = await fetch(`/similarity/${encodeURIComponent(word)}?k=${k}`, {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -873,7 +919,11 @@
             button.innerHTML = '<div class="spinner"></div>Loading...';
             
             try {
-                const response = await fetch('/model/vocabulary/size');
+                const response = await fetch('/model/vocabulary/size', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -900,7 +950,11 @@
             button.innerHTML = '<div class="spinner"></div>Loading...';
             
             try {
-                const response = await fetch('/model/vocabulary/sample?limit=30');
+                const response = await fetch('/model/vocabulary/sample?limit=30', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -1026,10 +1080,123 @@
             container.innerHTML = html;
         }
         
-        // Initialize
-        connectWebSocket();
-        checkModelStatus();
-        refreshModels();
+        // Add session management UI
+        function addSessionUI() {
+            const currentSessionId = getSessionId();
+            
+            // Add session info panel
+            const sessionPanel = document.createElement('div');
+            sessionPanel.id = 'session-panel';
+            sessionPanel.style.cssText = `
+                position: fixed; 
+                top: 10px; 
+                right: 10px; 
+                background: rgba(255,255,255,0.95); 
+                border: 1px solid #ddd;
+                padding: 10px; 
+                border-radius: 8px; 
+                font-size: 12px; 
+                color: #333; 
+                z-index: 1000;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                max-width: 250px;
+            `;
+            
+            sessionPanel.innerHTML = `
+                <div style="font-weight: bold; margin-bottom: 5px; color: #007bff;">🔗 Tab Session</div>
+                <div style="margin-bottom: 5px;">ID: <code style="background: #f0f0f0; padding: 1px 3px; border-radius: 3px;">${currentSessionId.substr(0, 20)}...</code></div>
+                <div style="margin-bottom: 5px; color: #666; font-size: 11px;">This tab has its own isolated model & training</div>
+                <div id="session-stats" style="margin-bottom: 8px; font-size: 11px; color: #17a2b8;">Loading stats...</div>
+                <button onclick="resetSession()" style="
+                    background: #dc3545; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 4px; 
+                    font-size: 11px; 
+                    cursor: pointer;
+                    margin-right: 5px;
+                ">Reset Session</button>
+                <button onclick="refreshSessionStats()" style="
+                    background: #28a745; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 4px; 
+                    font-size: 11px; 
+                    cursor: pointer;
+                ">Refresh Stats</button>
+            `;
+            
+            document.body.appendChild(sessionPanel);
+        }
+        
+        // Get session statistics
+        async function refreshSessionStats() {
+            try {
+                const response = await fetch('/session/stats', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    const statsDiv = document.getElementById('session-stats');
+                    if (statsDiv) {
+                        statsDiv.innerHTML = `
+                            Global: ${data.global_stats.active_sessions} sessions, ${data.global_stats.cached_models} models<br>
+                            Tab: ${data.session_training_jobs} jobs, Model: ${data.session_model_loaded ? '✓' : '✗'}
+                        `;
+                    }
+                } else {
+                    console.error('Failed to get session stats');
+                }
+            } catch (error) {
+                console.error('Error getting session stats:', error);
+            }
+        }
+        
+        // Reset session function
+        function resetSession() {
+            if (confirm('This will reset your session and clear your current model. Continue?')) {
+                // Clear session storage
+                sessionStorage.removeItem('tab_session_id');
+                sessionId = null;
+                
+                // Close WebSocket
+                if (socket) {
+                    socket.close();
+                }
+                
+                // Reload page
+                window.location.reload();
+            }
+        }
+        
+        // Initialize session and connections
+        function initialize() {
+            // Get or create session ID first
+            const currentSessionId = getSessionId();
+            console.log('Tab Session ID:', currentSessionId);
+            
+            // Add session UI
+            addSessionUI();
+            
+            // Connect and initialize
+            connectWebSocket();
+            checkModelStatus();
+            refreshModels();
+            
+            // Refresh session stats
+            setTimeout(refreshSessionStats, 1000);
+            
+            // Auto-refresh session stats every 10 seconds
+            setInterval(refreshSessionStats, 10000);
+        }
+        
+        // Initialize when page loads
+        initialize();
         
         // Add real-time text validation
         document.getElementById('textInput').addEventListener('input', updateTextStats);
@@ -1057,7 +1224,11 @@
         
         async function refreshTrainingJobs() {
             try {
-                const response = await fetch('/training/jobs');
+                const response = await fetch('/training/jobs', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 if (response.ok) {
                     const data = await response.json();
                     displayTrainingJobs(data);

@@ -3,7 +3,7 @@
 Score API - Document quality scoring endpoints
 """
 
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, HTTPException, File, UploadFile, Request
 from pydantic import BaseModel
 from typing import Optional, List
 import logging
@@ -36,18 +36,16 @@ class BatchScoreResponse(BaseModel):
     predictions: List[dict]
     metrics: Optional[dict] = None
 
-# This will be set from main app
-current_model = None
+# Session manager will be set from main app
+session_manager = None
 
 # Thread pool for non-blocking scoring operations
 scoring_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scoring")
-model_lock = threading.RLock()
 
-def set_model(model):
-    """Set the current model for scoring"""
-    global current_model
-    with model_lock:
-        current_model = model
+def set_session_manager(sm):
+    """Set the session manager for session-based scoring"""
+    global session_manager
+    session_manager = sm
 
 def _predict_sync(model, text, k=1):
     """Synchronous prediction function to run in thread pool"""
@@ -56,17 +54,23 @@ def _predict_sync(model, text, k=1):
     return model.predict(text, k=k)
 
 @router.post("/score", response_model=ScoreResponse)
-async def score_text(request: TextScore):
+async def score_text(request_data: TextScore, request: Request):
     """
-    Score a text for quality.
+    Score a text for quality using session-specific model.
     
     Returns prediction label, confidence score, and quality decision.
     """
     
-    if not current_model:
-        raise HTTPException(status_code=503, detail="No model available. Please train a model first using /train endpoint.")
+    if not session_manager:
+        raise HTTPException(status_code=503, detail="Session manager not available")
     
-    text = request.text.strip()
+    session_id = request.state.session_id
+    current_model = session_manager.get_model(session_id)
+    
+    if not current_model:
+        raise HTTPException(status_code=503, detail="No model available for your session. Please train or select a model first.")
+    
+    text = request_data.text.strip()
     
     # Validate text requirements
     is_valid, error_message = validate_text_requirements(text)
@@ -80,17 +84,11 @@ async def score_text(request: TextScore):
     
     try:
         # Get prediction using preprocessed text asynchronously
-        with model_lock:
-            model_ref = current_model
-        
-        if model_ref is None:
-            raise HTTPException(status_code=503, detail="No model available. Please train a model first using /train endpoint.")
-        
         loop = asyncio.get_event_loop()
         prediction = await loop.run_in_executor(
             scoring_executor, 
             _predict_sync, 
-            model_ref, 
+            current_model, 
             processed_text, 
             1
         )
@@ -103,7 +101,7 @@ async def score_text(request: TextScore):
         is_high_quality = predicted_label == 'high' and confidence >= threshold
         
         return ScoreResponse(
-            text=request.text,
+            text=request_data.text,
             predicted_label=predicted_label,
             confidence=confidence,
             is_high_quality=is_high_quality
@@ -113,15 +111,21 @@ async def score_text(request: TextScore):
         raise HTTPException(status_code=500, detail=f"Scoring failed: {str(e)}")
 
 @router.post("/score/batch", response_model=BatchScoreResponse)
-async def score_batch(file: UploadFile = File(...)):
+async def score_batch(request: Request, file: UploadFile = File(...)):
     """
-    Score a batch of texts from uploaded file
+    Score a batch of texts from uploaded file using session-specific model
     
     Expected file format: Each line should be "__label__[high|low] [text]" or just "[text]"
     """
     
+    if not session_manager:
+        raise HTTPException(status_code=503, detail="Session manager not available")
+    
+    session_id = request.state.session_id
+    current_model = session_manager.get_model(session_id)
+    
     if not current_model:
-        raise HTTPException(status_code=503, detail="No model available. Please train or select a model first.")
+        raise HTTPException(status_code=503, detail="No model available for your session. Please train or select a model first.")
     
     if not file.filename.endswith('.txt'):
         raise HTTPException(status_code=400, detail="File must be a .txt file")
@@ -175,23 +179,11 @@ async def score_batch(file: UploadFile = File(...)):
                 continue
             
             # Get prediction asynchronously
-            with model_lock:
-                model_ref = current_model
-            
-            if model_ref is None:
-                predictions.append({
-                    "line_number": line_num,
-                    "text": text,
-                    "error": "Model not available",
-                    "true_label": true_label
-                })
-                continue
-            
             loop = asyncio.get_event_loop()
             prediction = await loop.run_in_executor(
                 scoring_executor,
                 _predict_sync,
-                model_ref,
+                current_model,
                 processed_text,
                 1
             )
