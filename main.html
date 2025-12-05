@@ -43,6 +43,19 @@
         .param-item label { font-weight: bold; margin-bottom: 5px; }
         .param-item input, .param-item select { padding: 5px; border: 1px solid #ced4da; border-radius: 3px; }
         .autotune-badge { background: #17a2b8; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; margin-left: 8px; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: none; border-radius: 8px; width: 90%; max-width: 1000px; max-height: 80%; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-close { color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .modal-close:hover { color: #000; }
+        .jobs-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        .jobs-table th, .jobs-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        .jobs-table th { background-color: #f8f9fa; font-weight: bold; }
+        .status-badge { padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+        .status-starting { background: #fff3cd; color: #856404; }
+        .status-training { background: #cce5ff; color: #004085; }
+        .status-completed { background: #d4edda; color: #155724; }
+        .status-failed { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
@@ -151,6 +164,7 @@
         </div>
         
         <button class="button" onclick="trainModel()" id="trainButton">Train Model</button>
+        <button class="button" onclick="showTrainingJobs()" id="viewJobsButton" style="background: #6c757d; margin-left: 10px;">View Training Jobs</button>
         <div id="trainingInfo" style="display: none; margin-top: 10px; padding: 10px; background: #e8f4fd; border: 1px solid #b8daff; border-radius: 5px;">
             <div id="modelUUID"></div>
             <div id="trainingStatus"></div>
@@ -196,11 +210,63 @@
         </div>
     </div>
     
+    <!-- Training Jobs Modal -->
+    <div id="trainingJobsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Training Jobs Status</h2>
+                <span class="modal-close" onclick="closeTrainingJobs()">&times;</span>
+            </div>
+            <div id="jobsStats" style="margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
+                <span id="jobsStatsContent">Loading...</span>
+                <button class="button" onclick="refreshTrainingJobs()" style="float: right; padding: 5px 10px; font-size: 12px; background: #17a2b8;">Refresh</button>
+            </div>
+            <div id="jobsTableContainer">
+                <table class="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>UUID</th>
+                            <th>Filename</th>
+                            <th>Status</th>
+                            <th>Message</th>
+                            <th>Started</th>
+                            <th>Completed/Failed At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobsTableBody">
+                        <tr><td colspan="6" style="text-align: center;">Loading jobs...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
     <script>
         let socket = null;
+        let sessionId = null;
+        
+        // Get tab-specific session ID using sessionStorage
+        function getSessionId() {
+            if (sessionId) return sessionId;
+            
+            // Try to get from sessionStorage (tab-specific)
+            sessionId = sessionStorage.getItem('tab_session_id');
+            
+            if (!sessionId) {
+                // Generate new tab-specific session ID
+                sessionId = 'tab_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+                sessionStorage.setItem('tab_session_id', sessionId);
+                console.log('Created new tab session:', sessionId);
+            } else {
+                console.log('Using existing tab session:', sessionId);
+            }
+            
+            return sessionId;
+        }
         
         function connectWebSocket() {
-            socket = new WebSocket('ws://localhost:8000/ws');
+            const currentSessionId = getSessionId();
+            socket = new WebSocket(`ws://localhost:8000/ws?session_id=${currentSessionId}`);
             
             socket.onmessage = function(event) {
                 const data = JSON.parse(event.data);
@@ -210,6 +276,10 @@
             socket.onclose = function() {
                 console.log('WebSocket connection closed');
             };
+            
+            socket.onerror = function(error) {
+                console.log('WebSocket error:', error);
+            };
         }
         
         function updateTrainingProgress(status) {
@@ -218,22 +288,37 @@
             const modelUUID = document.getElementById('modelUUID');
             const trainingStatusDiv = document.getElementById('trainingStatus');
             
+            // NEVER disable the train button - always allow new training requests
+            trainButton.disabled = false;
+            
+            // Update button text to show current system status
+            let buttonText = 'Train Model';
+            if (status.active_jobs > 0) {
+                buttonText += ` (Active: ${status.active_jobs}/${status.max_concurrent_jobs || 4})`;
+            }
+            if (status.queue_size > 0) {
+                buttonText += ` Queue: ${status.queue_size}`;
+            }
+            trainButton.innerHTML = buttonText;
+            
             if (status.is_training) {
-                trainButton.disabled = true;
-                trainButton.innerHTML = '<div class="spinner"></div>Training...';
-                
-                // Show training info
+                // Show training info for current training
                 trainingInfo.style.display = 'block';
                 if (status.model_uuid) {
                     modelUUID.innerHTML = `<strong>Model UUID:</strong> ${status.model_uuid}`;
                 }
                 if (status.message) {
-                    trainingStatusDiv.innerHTML = `<strong>Status:</strong> ${status.message}`;
+                    let jobInfo = '';
+                    if (status.active_jobs > 0) {
+                        jobInfo += ` (${status.active_jobs} active`;
+                        if (status.queue_size > 0) {
+                            jobInfo += `, ${status.queue_size} queued`;
+                        }
+                        jobInfo += ')';
+                    }
+                    trainingStatusDiv.innerHTML = `<strong>Status:</strong> ${status.message}${jobInfo}`;
                 }
             } else {
-                trainButton.disabled = false;
-                trainButton.innerHTML = 'Train Model';
-                
                 if (status.progress === 100) {
                     // Training completed - auto-refresh models and auto-load the new model
                     refreshModels().then(() => {
@@ -257,7 +342,11 @@
         
         async function checkModelStatus() {
             try {
-                const response = await fetch('/model/status');
+                const response = await fetch('/model/status', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 const data = await response.json();
                 
                 const statusDiv = document.getElementById('modelStatus');
@@ -285,7 +374,11 @@
         
         async function refreshModels() {
             try {
-                const response = await fetch('/models');
+                const response = await fetch('/models', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 const data = await response.json();
                 
                 const modelSelect = document.getElementById('modelSelect');
@@ -341,6 +434,7 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
+                            'X-Session-ID': getSessionId()
                         },
                         body: JSON.stringify({model_id: foundModelId})
                     });
@@ -390,6 +484,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-Session-ID': getSessionId()
                     },
                     body: JSON.stringify({model_id: selectedModel})
                 });
@@ -427,9 +522,9 @@
                 return;
             }
             
-            // Show spinner immediately
-            trainButton.disabled = true;
-            trainButton.innerHTML = '<div class="spinner"></div>Training...';
+            // Show spinner but keep button enabled for multiple submissions
+            const originalText = trainButton.innerHTML;
+            trainButton.innerHTML = '<div class="spinner"></div>Submitting...';
             
             const formData = new FormData();
             formData.append('file', file);
@@ -439,8 +534,7 @@
                 const validationFile = validationFileInput.files[0];
                 if (!validationFile) {
                     alert('Please select a validation file for autotune or uncheck the autotune option');
-                    trainButton.disabled = false;
-                    trainButton.innerHTML = 'Train Model';
+                    trainButton.innerHTML = originalText;
                     return;
                 }
                 formData.append('validation_file', validationFile);
@@ -455,6 +549,9 @@
             try {
                 const response = await fetch('/train', {
                     method: 'POST',
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    },
                     body: formData
                 });
                 
@@ -482,14 +579,12 @@
                     const error = await response.text();
                     alert('Training failed: ' + error);
                     // Reset button on error
-                    trainButton.disabled = false;
-                    trainButton.innerHTML = 'Train Model';
+                    trainButton.innerHTML = originalText;
                 }
             } catch (error) {
                 alert('Error: ' + error.message);
                 // Reset button on error
-                trainButton.disabled = false;
-                trainButton.innerHTML = 'Train Model';
+                trainButton.innerHTML = originalText;
             }
         }
         
@@ -537,6 +632,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-Session-ID': getSessionId()
                     },
                     body: JSON.stringify({text: text})
                 });
@@ -588,6 +684,9 @@
                 
                 const response = await fetch('/score/batch', {
                     method: 'POST',
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    },
                     body: formData
                 });
                 
@@ -765,7 +864,11 @@
             resultDiv.innerHTML = '<div>Searching for similar words...</div>';
             
             try {
-                const response = await fetch(`/similarity/${encodeURIComponent(word)}?k=${k}`);
+                const response = await fetch(`/similarity/${encodeURIComponent(word)}?k=${k}`, {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -816,7 +919,11 @@
             button.innerHTML = '<div class="spinner"></div>Loading...';
             
             try {
-                const response = await fetch('/model/vocabulary/size');
+                const response = await fetch('/model/vocabulary/size', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -843,7 +950,11 @@
             button.innerHTML = '<div class="spinner"></div>Loading...';
             
             try {
-                const response = await fetch('/model/vocabulary/sample?limit=30');
+                const response = await fetch('/model/vocabulary/sample?limit=30', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
                 
                 if (response.ok) {
                     const data = await response.json();
@@ -969,14 +1080,212 @@
             container.innerHTML = html;
         }
         
-        // Initialize
-        connectWebSocket();
-        checkModelStatus();
-        refreshModels();
+        // Add session management UI
+        function addSessionUI() {
+            const currentSessionId = getSessionId();
+            
+            // Add session info panel
+            const sessionPanel = document.createElement('div');
+            sessionPanel.id = 'session-panel';
+            sessionPanel.style.cssText = `
+                position: fixed; 
+                top: 10px; 
+                right: 10px; 
+                background: rgba(255,255,255,0.95); 
+                border: 1px solid #ddd;
+                padding: 10px; 
+                border-radius: 8px; 
+                font-size: 12px; 
+                color: #333; 
+                z-index: 1000;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                max-width: 250px;
+            `;
+            
+            sessionPanel.innerHTML = `
+                <div style="font-weight: bold; margin-bottom: 5px; color: #007bff;">🔗 Tab Session</div>
+                <div style="margin-bottom: 5px;">ID: <code style="background: #f0f0f0; padding: 1px 3px; border-radius: 3px;">${currentSessionId.substr(0, 20)}...</code></div>
+                <div style="margin-bottom: 5px; color: #666; font-size: 11px;">This tab has its own isolated model & training</div>
+                <div id="session-stats" style="margin-bottom: 8px; font-size: 11px; color: #17a2b8;">Loading stats...</div>
+                <button onclick="resetSession()" style="
+                    background: #dc3545; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 4px; 
+                    font-size: 11px; 
+                    cursor: pointer;
+                    margin-right: 5px;
+                ">Reset Session</button>
+                <button onclick="refreshSessionStats()" style="
+                    background: #28a745; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 4px; 
+                    font-size: 11px; 
+                    cursor: pointer;
+                ">Refresh Stats</button>
+            `;
+            
+            document.body.appendChild(sessionPanel);
+        }
+        
+        // Get session statistics
+        async function refreshSessionStats() {
+            try {
+                const response = await fetch('/session/stats', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    const statsDiv = document.getElementById('session-stats');
+                    if (statsDiv) {
+                        statsDiv.innerHTML = `
+                            Global: ${data.global_stats.active_sessions} sessions, ${data.global_stats.cached_models} models<br>
+                            Tab: ${data.session_training_jobs} jobs, Model: ${data.session_model_loaded ? '✓' : '✗'}
+                        `;
+                    }
+                } else {
+                    console.error('Failed to get session stats');
+                }
+            } catch (error) {
+                console.error('Error getting session stats:', error);
+            }
+        }
+        
+        // Reset session function
+        function resetSession() {
+            if (confirm('This will reset your session and clear your current model. Continue?')) {
+                // Clear session storage
+                sessionStorage.removeItem('tab_session_id');
+                sessionId = null;
+                
+                // Close WebSocket
+                if (socket) {
+                    socket.close();
+                }
+                
+                // Reload page
+                window.location.reload();
+            }
+        }
+        
+        // Initialize session and connections
+        function initialize() {
+            // Get or create session ID first
+            const currentSessionId = getSessionId();
+            console.log('Tab Session ID:', currentSessionId);
+            
+            // Add session UI
+            addSessionUI();
+            
+            // Connect and initialize
+            connectWebSocket();
+            checkModelStatus();
+            refreshModels();
+            
+            // Refresh session stats
+            setTimeout(refreshSessionStats, 1000);
+            
+            // Auto-refresh session stats every 10 seconds
+            setInterval(refreshSessionStats, 10000);
+        }
+        
+        // Initialize when page loads
+        initialize();
         
         // Add real-time text validation
         document.getElementById('textInput').addEventListener('input', updateTextStats);
         updateTextStats(); // Initial call
+        
+        // Training Jobs Modal Functions
+        async function showTrainingJobs() {
+            const modal = document.getElementById('trainingJobsModal');
+            modal.style.display = 'block';
+            await refreshTrainingJobs();
+            
+            // Auto-refresh every 3 seconds while modal is open
+            const refreshInterval = setInterval(async () => {
+                if (modal.style.display === 'block') {
+                    await refreshTrainingJobs();
+                } else {
+                    clearInterval(refreshInterval);
+                }
+            }, 3000);
+        }
+        
+        function closeTrainingJobs() {
+            document.getElementById('trainingJobsModal').style.display = 'none';
+        }
+        
+        async function refreshTrainingJobs() {
+            try {
+                const response = await fetch('/training/jobs', {
+                    headers: {
+                        'X-Session-ID': getSessionId()
+                    }
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    displayTrainingJobs(data);
+                } else {
+                    console.error('Failed to fetch training jobs');
+                }
+            } catch (error) {
+                console.error('Error fetching training jobs:', error);
+            }
+        }
+        
+        function displayTrainingJobs(data) {
+            // Update stats
+            const statsContent = document.getElementById('jobsStatsContent');
+            statsContent.innerHTML = `
+                <strong>Total:</strong> ${data.total_jobs} | 
+                <strong>Active:</strong> ${data.active_count} | 
+                <strong>Completed:</strong> ${data.completed_count} | 
+                <strong>Failed:</strong> ${data.failed_count}
+            `;
+            
+            // Update table
+            const tableBody = document.getElementById('jobsTableBody');
+            
+            if (data.jobs.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #6c757d;">No training jobs found</td></tr>';
+                return;
+            }
+            
+            let html = '';
+            data.jobs.forEach(job => {
+                const statusClass = `status-${job.status}`;
+                const startedTime = new Date(job.started_at).toLocaleString();
+                const completedTime = job.completed_at ? new Date(job.completed_at).toLocaleString() : '-';
+                
+                html += `
+                    <tr>
+                        <td><code>${job.short_uuid}</code></td>
+                        <td style="font-size: 12px;">${job.filename}</td>
+                        <td><span class="status-badge ${statusClass}">${job.status.toUpperCase()}</span></td>
+                        <td style="font-size: 12px; max-width: 200px;">${job.message}</td>
+                        <td style="font-size: 11px;">${startedTime}</td>
+                        <td style="font-size: 11px;">${completedTime}</td>
+                    </tr>
+                `;
+            });
+            
+            tableBody.innerHTML = html;
+        }
+        
+        // Close modal when clicking outside of it
+        window.onclick = function(event) {
+            const modal = document.getElementById('trainingJobsModal');
+            if (event.target === modal) {
+                closeTrainingJobs();
+            }
+        }
     </script>
 </body>
 </html>
